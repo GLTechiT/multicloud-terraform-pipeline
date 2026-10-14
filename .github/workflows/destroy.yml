@@ -1,0 +1,37 @@
+name: destroy
+
+# Execução manual: Actions > destroy > Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Qual ambiente destruir
+        type: choice
+        options: [ALL, PRD, DEV, QA]
+        default: ALL
+      confirm:
+        description: Digite "destroy" para confirmar
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terraform-refs/heads/main
+  cancel-in-progress: false
+
+jobs:
+  destroy:
+    name: ${{ matrix.environment }}
+    if: inputs.confirm == 'destroy'
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: ${{ fromJSON(inputs.environment == 'ALL' && '["PRD","DEV","QA"]' || format('["{0}"]', inputs.environment)) }}
+    uses: ./.github/workflows/_terraform.yml
+    with:
+      environment: ${{ matrix.environment }}
+      mode: destroy
+    secrets: inherit

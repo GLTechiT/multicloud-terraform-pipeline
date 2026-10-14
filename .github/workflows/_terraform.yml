@@ -1,0 +1,173 @@
+name: _terraform
+
+# Workflow reutilizável: executa um ambiente (QA, DEV ou PRD).
+# mode: plan    -> só plan (usado em PR)
+#       deploy  -> plan + apply (apply espera as regras do environment do GitHub)
+#       destroy -> destroy (também passa pelo environment)
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: QA, DEV ou PRD (nome do environment no GitHub)
+        type: string
+        required: true
+      mode:
+        type: string
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  ENV_NAME: ${{ inputs.environment }}
+  # Variáveis do Terraform (TF_VAR_<nome>)
+  TF_VAR_aws_region: ${{ vars.AWS_REGION }}
+  TF_VAR_ssh_pubkey_gabriel: ${{ vars.SSH_PUBKEY_GABRIEL }}
+  TF_VAR_ssh_pubkey_rafael: ${{ vars.SSH_PUBKEY_RAFAEL }}
+  TF_VAR_vpn_allowed_cidrs: ${{ vars.VPN_ALLOWED_CIDRS }}
+  TF_VAR_vpn_peer_public_keys: ${{ vars.VPN_PEER_PUBLIC_KEYS }}
+  TF_VAR_wireguard_server_private_key: ${{ secrets.WG_SERVER_PRIVATE_KEY }}
+  TF_VAR_onprem_vpn_psk: ${{ secrets.ONPREM_VPN_PSK }}
+  # Backend (state no S3)
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  # Provider Azure via OIDC
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  plan:
+    name: plan
+    if: inputs.mode != 'destroy'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.16"
+          terraform_wrapper: false
+
+      - name: Login AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Ambiente
+        run: echo "TF_ENV=${ENV_NAME,,}" >> "$GITHUB_ENV" # QA -> qa
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: terraform init
+        run: ../scripts/tf-init.sh "$TF_ENV"
+
+      - name: terraform validate
+        run: terraform validate
+
+      - name: terraform plan
+        run: |
+          terraform plan -var-file="env/${TF_ENV}.tfvars" -out=tfplan -lock-timeout=5m -no-color
+          terraform show -no-color tfplan > plan.txt
+          {
+            echo "### Plan — ${ENV_NAME}"
+            echo '```hcl'
+            cat plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Salvar plan
+        if: inputs.mode == 'deploy'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ inputs.environment }}
+          path: terraform/tfplan
+          retention-days: 1
+
+  apply:
+    name: apply
+    needs: plan
+    if: inputs.mode == 'deploy'
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }} # gates: DEV = Rafael aprova, PRD = Gabriel aprova
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.16"
+          terraform_wrapper: false
+
+      - name: Login AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Ambiente
+        run: echo "TF_ENV=${ENV_NAME,,}" >> "$GITHUB_ENV"
+
+      - name: terraform init
+        run: ../scripts/tf-init.sh "$TF_ENV"
+
+      - name: Baixar plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ inputs.environment }}
+          path: terraform
+
+      # Aplica exatamente o plan revisado; se o state mudou desde então, o Terraform recusa
+      - name: terraform apply
+        run: terraform apply -auto-approve -lock-timeout=5m tfplan
+
+      - name: Outputs
+        run: |
+          {
+            echo "### Outputs — ${ENV_NAME}"
+            echo '```'
+            terraform output
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  destroy:
+    name: destroy
+    if: inputs.mode == 'destroy'
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.16"
+          terraform_wrapper: false
+
+      - name: Login AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Ambiente
+        run: echo "TF_ENV=${ENV_NAME,,}" >> "$GITHUB_ENV"
+
+      - name: terraform init
+        run: ../scripts/tf-init.sh "$TF_ENV"
+
+      - name: terraform destroy
+        run: terraform destroy -auto-approve -lock-timeout=5m -var-file="env/${TF_ENV}.tfvars"

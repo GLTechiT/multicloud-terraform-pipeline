@@ -1,0 +1,70 @@
+name: terraform
+
+# PR            -> plan em QA, DEV e PRD (só leitura, para revisão)
+# merge na main -> QA (automático) -> DEV (Rafael aprova) -> PRD (Gabriel aprova)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - "scripts/**"
+      - ".github/workflows/terraform.yml"
+      - ".github/workflows/_terraform.yml"
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - "scripts/**"
+      - ".github/workflows/terraform.yml"
+      - ".github/workflows/_terraform.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write # necessário para o OIDC (login sem senha na AWS/Azure)
+  contents: read
+
+# Nunca duas execuções na mesma branch ao mesmo tempo
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pr-plan:
+    name: ${{ matrix.environment }}
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [QA, DEV, PRD]
+    uses: ./.github/workflows/_terraform.yml
+    with:
+      environment: ${{ matrix.environment }}
+      mode: plan
+    secrets: inherit
+
+  qa:
+    name: QA
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/_terraform.yml
+    with:
+      environment: QA
+      mode: deploy
+    secrets: inherit
+
+  dev:
+    name: DEV
+    needs: qa
+    uses: ./.github/workflows/_terraform.yml
+    with:
+      environment: DEV
+      mode: deploy
+    secrets: inherit
+
+  prd:
+    name: PRD
+    needs: dev
+    uses: ./.github/workflows/_terraform.yml
+    with:
+      environment: PRD
+      mode: deploy
+    secrets: inherit

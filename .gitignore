@@ -1,0 +1,27 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+plan.txt
+crash.log
+terraform.tfvars
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+
+# Chaves SSH — nunca versionar
+*.key
+*.pem
+
+# Configuração local do Claude Code
+.claude/settings.local.json
+
+# Rascunhos de divulgação (LinkedIn etc.) — mantidos fora do repositório público
+docs/linkedin.*
+
+# Configurações de cliente WireGuard (contêm chave privada)
+*.wg.conf
+wg-*.conf
